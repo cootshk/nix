@@ -5,6 +5,7 @@
 #include "nix/expr/symbol-table.hh"
 
 #include <boost/container/static_vector.hpp>
+#include <boost/iterator/function_output_iterator.hpp>
 
 #include <algorithm>
 #include <functional>
@@ -463,12 +464,44 @@ private:
         return bindings->baseLayer;
     }
 
+    /**
+     * If the bindings gets "layered" on top of another we need to recalculate
+     * the number of unique attributes in the chain.
+     *
+     * This is done by either iterating over the base "layer" and the newly added
+     * attributes and counting duplicates. If the base "layer" is big this approach
+     * is inefficient and we fall back to doing per-element binary search in the base
+     * "layer".
+     */
     void finishSizeIfNecessary()
     {
-        if (hasBaseLayer())
-            /* NOTE: Do not use std::ranges::distance, since Bindings is a sized
-               range, but we are calculating this size here. */
-            bindings->numAttrsInChain = std::distance(bindings->begin(), bindings->end());
+        if (!hasBaseLayer())
+            return;
+
+        auto & base = *bindings->baseLayer;
+        auto attrs = std::span(bindings->attrs, bindings->numAttrs);
+
+        Bindings::size_type duplicates = 0;
+
+        /* If the base bindings is smaller than the newly added attributes
+           iterate using std::set_intersection to run in O(n + m), where n,m are
+           the sizes of "base" and newly added attrs. Otherwise use an O(m *
+           log(n)) per-attr binary search to check for duplicates. */
+        if (attrs.size() > base.size()) {
+            std::set_intersection(
+                base.begin(),
+                base.end(),
+                attrs.begin(),
+                attrs.end(),
+                boost::make_function_output_iterator([&]([[maybe_unused]] auto && _) { ++duplicates; }));
+        } else {
+            for (const auto & attr : attrs) {
+                if (base.get(attr.name))
+                    ++duplicates;
+            }
+        }
+
+        bindings->numAttrsInChain = base.numAttrsInChain + attrs.size() - duplicates;
     }
 
 public:
